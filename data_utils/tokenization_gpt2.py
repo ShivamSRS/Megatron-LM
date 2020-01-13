@@ -15,7 +15,7 @@
 """Tokenization classes for OpenAI GPT."""
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
-
+import mpu
 import sys
 import json
 import logging
@@ -94,6 +94,15 @@ class GPT2Tokenizer(object):
         Instantiate a PreTrainedBertModel from a pre-trained model file.
         Download and cache the pre-trained model file if needed.
         """
+#         print("----------")
+#         print("model parallel group: ", mpu.get_model_parallel_group())
+#         print("data parallel group: ", mpu.get_data_parallel_group())
+#         print("model parallel world size: ", mpu.get_model_parallel_world_size())
+#         print("data parallel world size: ", mpu.get_data_parallel_world_size())
+#         print("model parallel rank: ", mpu.get_model_parallel_rank())
+#         print("data parallel rank: ", mpu.get_data_parallel_rank())
+#         print("model parallel source rank: ", mpu.get_model_parallel_src_rank())
+#         print(cache_dir)
         if pretrained_model_name_or_path in PRETRAINED_VOCAB_ARCHIVE_MAP:
             vocab_file = PRETRAINED_VOCAB_ARCHIVE_MAP[pretrained_model_name_or_path]
             merges_file = PRETRAINED_MERGES_ARCHIVE_MAP[pretrained_model_name_or_path]

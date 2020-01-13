@@ -42,3 +42,4 @@ python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        --fp32-layernorm \
        --fp32-embedding
 
+set +x

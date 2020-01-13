@@ -364,6 +364,7 @@ def get_args():
     args.world_size = int(os.getenv("WORLD_SIZE", '1'))
 
     if os.getenv('OMPI_COMM_WORLD_LOCAL_RANK'):
+        print("kaisa re kaisa")
         # We are using (OpenMPI) mpirun for launching distributed data parallel processes
         local_rank = int(os.getenv('OMPI_COMM_WORLD_LOCAL_RANK'))
         local_size = int(os.getenv('OMPI_COMM_WORLD_LOCAL_SIZE'))

@@ -17,6 +17,8 @@
 
 from datetime import datetime
 import os
+os.environ['CUDA_VISIBLE_DEVICES']='0,1,2,3,5,6,7'
+
 import random
 import math
 import numpy as np
@@ -46,7 +48,7 @@ from gpt2_data_loader import make_gpt2_dataloaders
 
 def get_model(args):
     """Build the model."""
-
+    print(args.vocab_size, "vocab size")
     print_rank_0('building GPT2 model ...')
     model = GPT2Model(num_layers=args.num_layers,
                       vocab_size=args.vocab_size,
@@ -505,8 +507,10 @@ def initialize_distributed(args):
 
     # Manually set the device ids.
     device = args.rank % torch.cuda.device_count()
+    print("device=",device)
     if args.local_rank is not None:
         device = args.local_rank
+        print("local",args.local_rank)
     torch.cuda.set_device(device)
     # Call the init process
     init_method = 'tcp://'
@@ -607,7 +611,9 @@ def main():
         print_args(args, writer)
 
     # Autoresume.
+    print("barrier ahead")
     torch.distributed.barrier()
+    print("barrier done")
     if args.adlr_autoresume:
         enable_adlr_autoresume(args)
 

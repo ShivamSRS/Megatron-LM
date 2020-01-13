@@ -480,13 +480,23 @@ class GPT2Dataset(data.Dataset):
 
     def init_weighting(self):
         if self.weighted:
+            
             if hasattr(self.ds, 'is_lazy') and self.ds.is_lazy:
+                
                 lens = np.array(self.ds.lens)
             else:
                 lens = np.array([len(d['text']) if isinstance(d, dict)
                                  else len(d) for d in self.ds])
             self.total_len = np.sum(lens)
+            
+            if lens.shape == ():
+                lens = lens.reshape(1)
+            
+            
             self.weighting = list(accumulate(lens))
+            
+            
+            
         else:
             self.weighting = None
 

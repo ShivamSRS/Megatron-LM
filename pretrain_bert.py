@@ -42,6 +42,7 @@ from utils import print_params_min_max_norm
 from utils import print_rank_0
 from utils import enable_adlr_autoresume
 from utils import check_adlr_autoresume_termination
+os.environ['CUDA_VISIBLE_DEVICES']='1,2,3,5,6,7'
 
 def get_model(args):
     """Build the model."""
@@ -193,10 +194,12 @@ def get_batch(data_iterator, timers):
         data = next(data_iterator)
     else:
         data = None
+    print("serialdata", data)
     timers('data loader').stop()
     data_b = mpu.broadcast_data(keys, data, datatype)
 
     # Unpack.
+    print("this is data pll",data_b)
     tokens = data_b['text'].long()
     types = data_b['types'].long()
     next_sentence = data_b['is_random'].long()

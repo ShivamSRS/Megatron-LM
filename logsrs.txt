@@ -1,0 +1,27 @@
+[I 14:25:37.299 NotebookApp] JupyterLab extension loaded from /opt/conda/lib/python3.6/site-packages/jupyterlab
+[I 14:25:37.300 NotebookApp] JupyterLab application directory is /opt/conda/share/jupyter/lab
+[I 14:25:37.301 NotebookApp] Serving notebooks from local directory: /workspace/megatron/Megatron-LM-working
+[I 14:25:37.301 NotebookApp] The Jupyter Notebook is running at:
+[I 14:25:37.301 NotebookApp] http://(0c2cd398c49e or 127.0.0.1):8888/?token=ec24c16abd17d1e7b5e0dda0470e8372af26807c14a397c6
+[I 14:25:37.301 NotebookApp] Use Control-C to stop this server and shut down all kernels (twice to skip confirmation).
+[W 14:25:37.305 NotebookApp] No web browser found: could not locate runnable browser.
+[C 14:25:37.305 NotebookApp] 
+    
+    To access the notebook, open this file in a browser:
+        file:///root/.local/share/jupyter/runtime/nbserver-79555-open.html
+    Or copy and paste one of these URLs:
+        http://(0c2cd398c49e or 127.0.0.1):8888/?token=ec24c16abd17d1e7b5e0dda0470e8372af26807c14a397c6
+[I 14:26:09.964 NotebookApp] 302 GET / (10.24.18.100) 0.60ms
+[I 14:26:25.907 NotebookApp] Creating new notebook in /xlnet
+[I 14:26:26.715 NotebookApp] Kernel started: 0d910f2e-aef6-4072-8891-f97dabfd67b5
+[W 14:26:26.725 NotebookApp] 404 GET /nbextensions/widgets/notebook/js/extension.js?v=20200106142536 (10.24.18.100) 7.84ms referer=http://10.24.4.65:1002/notebooks/xlnet/Untitled.ipynb?kernel_name=python3
+[I 14:26:27.863 NotebookApp] Adapting to protocol v5.1 for kernel 0d910f2e-aef6-4072-8891-f97dabfd67b5
+[I 14:26:58.772 NotebookApp] Starting buffering for 0d910f2e-aef6-4072-8891-f97dabfd67b5:c5f0092c5da94edb92abe654ad0854f6
+[I 14:26:58.976 NotebookApp] Kernel shutdown: 0d910f2e-aef6-4072-8891-f97dabfd67b5
+[W 14:27:12.588 NotebookApp] delete /xlnet/Untitled.ipynb
+[W 14:27:12.589 NotebookApp] Skipping trash for /workspace/megatron/Megatron-LM-working/xlnet/Untitled.ipynb, on different device to home directory
+[I 14:27:15.873 NotebookApp] Creating new file in /xlnet
+[I 14:27:25.619 NotebookApp] Saving file at /xlnet/xlnet.py
+[I 14:54:07.795 NotebookApp] Saving file at /xlnet/xlnet.py
+[I 14:54:32.123 NotebookApp] Shutting down on /api/shutdown request.
+[I 14:54:32.124 NotebookApp] Shutting down 0 kernels

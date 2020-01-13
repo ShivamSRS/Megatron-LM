@@ -103,7 +103,9 @@ class GPT2Model(torch.nn.Module):
                 layer_past=None, get_present=False, tokentype_ids=None):
 
         # Embeddings.
+        print("input ids",input_ids.shape,input_ids.device)
         words_embeddings = self.word_embeddings(input_ids)
+        print("word_embeddings",self.word_embeddings.weight.shape,self.word_embeddings.weight,words_embeddings.device)
         position_embeddings = self.position_embeddings(position_ids)
         embeddings = words_embeddings + position_embeddings
         if tokentype_ids is not None:
@@ -119,12 +121,16 @@ class GPT2Model(torch.nn.Module):
         transformer_output = self.transformer(embeddings, attention_mask,
                                               layer_past=layer_past,
                                               get_present=get_present)
+        #print("transformer_output",transformer_output.shape,transformer_output.device)
+        
         if get_present:
             transformer_output, presents = transformer_output
 
         # Parallel logits.
         transformer_output_parallel = mpu.copy_to_model_parallel_region(
             transformer_output)
+        #print("transformer_output_parallel",transformer_output_parallel.shape,transformer_output_parallel.device)
+        
         logits_parallel = F.linear(transformer_output_parallel,
                                    self.word_embeddings.weight)
 
@@ -132,6 +138,8 @@ class GPT2Model(torch.nn.Module):
             output = logits_parallel
         else:
             output = mpu.gather_from_model_parallel_region(logits_parallel)
+            #print("output",output.shape,output.device)
+
         if get_present:
             output = [output, presents]
         return output

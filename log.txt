@@ -1,0 +1,16 @@
+[I 10:57:18.259 NotebookApp] The port 8888 is already in use, trying another port.
+[I 10:57:18.290 NotebookApp] JupyterLab extension loaded from /opt/conda/lib/python3.6/site-packages/jupyterlab
+[I 10:57:18.290 NotebookApp] JupyterLab application directory is /opt/conda/share/jupyter/lab
+[I 10:57:18.291 NotebookApp] Serving notebooks from local directory: /workspace/megatron/Megatron-LM
+[I 10:57:18.291 NotebookApp] The Jupyter Notebook is running at:
+[I 10:57:18.291 NotebookApp] http://(cdfe51acc4f0 or 127.0.0.1):8889/?token=180645fb945ccbcc474997f0e95ec557997c41dc95df9fea
+[I 10:57:18.291 NotebookApp] Use Control-C to stop this server and shut down all kernels (twice to skip confirmation).
+[W 10:57:18.295 NotebookApp] No web browser found: could not locate runnable browser.
+[C 10:57:18.295 NotebookApp] 
+    
+    To access the notebook, open this file in a browser:
+        file:///root/.local/share/jupyter/runtime/nbserver-5368-open.html
+    Or copy and paste one of these URLs:
+        http://(cdfe51acc4f0 or 127.0.0.1):8889/?token=180645fb945ccbcc474997f0e95ec557997c41dc95df9fea
+[C 05:35:45.284 NotebookApp] received signal 15, stopping
+[I 05:35:45.285 NotebookApp] Shutting down 0 kernels
