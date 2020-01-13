@@ -562,7 +562,13 @@ class XLNet(nn.Module):
             output = self.Dropout(output_g)
         else:
             output = self.Dropout(output_h)
-
+        print(output.shape,output.device,"output",self.softmax_b.shape,self.softmax_b.device,"softmax")
+        print("lookup table",lookup_table.weight.shape,lookup_table.weight.device)
+        #-----------------------srs----------------------------------------
+        #lookup table weights are still parallel shhape is [15261,32]  softmax [30522]
+        # output is [85,1,32]
+        
+        ##option a call an allgather or all reduce on lookup weights or b parallelise output
         logits = torch.einsum('ibd,nd->ibn', output, lookup_table.weight) + self.softmax_b
 
         return logits, new_mems
