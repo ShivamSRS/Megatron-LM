@@ -41,7 +41,7 @@ import torch.optim as optim
 from pytorch_pretrained_bert import BertTokenizer
 
 import mpu 
-os.environ['CUDA_VISIBLE_DEVICES']='1,2,3,5,6,7'
+os.environ['CUDA_VISIBLE_DEVICES']='0,1'
 
 
 def initialize_distributed(args):
@@ -147,14 +147,12 @@ def main():
 
         num_step = 0
         for feature in features:
-            print("featyure",type(feature))
 
             permutation = data_utils.make_permute(feature,
                                                   reuse_len=args.reuse_len,
                                                   seq_len=args.seq_len,
                                                   perm_size=args.perm_size,
                                                   num_predict=args.num_predict)
-            print("permut",type(permutation))
             keys = ['seg_id']
             datatype = torch.int32
             permutations = mpu.broadcast_data(keys,permutation,datatype)
@@ -166,12 +164,17 @@ def main():
             #########################################################################3
             # batch size is 1
             inp_k = segu['input_k'].unsqueeze(-1) # [seq_len, 1(=bsz)]
+#             print("inp_k, inp_k.type: ", inp_k, type(inp_k), inp_k.dtype)
             seg_id = permutations['seg_id'].unsqueeze(-1) # [seq_len, 1(=bsz)]
+#             print("seg_id, seg_id.type: ", seg_id, type(seg_id), seg_id.dtype)
             target = segu['target'].unsqueeze(-1) # [num_predict, 1(=bsz)]
             perm_mask = f32u['perm_mask'].unsqueeze(-1) # [seq_len, seq_len, 1(=bsz)]
+#             print("perm_mask: ", perm_mask, type(perm_mask), perm_mask.dtype)
             target_mapping = \
                 f32u['target_mapping'].unsqueeze(-1) # [num_predict, seq_len, 1(=bsz)]
+#             print("target_mapping: ", target_mapping, type(target_mapping), target_mapping.dtype)
             inp_q = f32u['input_q'].unsqueeze(-1) # [seq_len, 1(=bsz)]
+#             print("inp_q: ", inp_q, type(inp_q), inp_q.dtype)
             tgt_mask = f32u['target_mask'].unsqueeze(-1) # [num_predict, 1(=bsz)]
             ###############################################################################
 
@@ -179,13 +182,16 @@ def main():
                   mems=mems, perm_mask=perm_mask,
                   target_mapping=target_mapping, inp_q=inp_q)
 
-            lm_loss = criterion(logits.transpose(1, 2), target).type(torch.float32)
+            #lm_loss = criterion(logits.transpose(1, 2), target).type(torch.float32)
+            #####changed loss
+            lm_loss = mpu.vocab_parallel_cross_entropy(logits.contiguous().float(),
+                                  target)
             tgt_mask_sum = tgt_mask.reshape(-1).sum()
             lm_loss_sum = (lm_loss * tgt_mask).reshape(-1).sum()
 
             optimizer.zero_grad()
             total_loss = lm_loss_sum / tgt_mask_sum
-            print('Number of Epoch: %04d in %04d Step' % ((num_epoch + 1), (num_step + 1)),
+            print('Number of Epoch: %d in its %d Step' % ((num_epoch + 1), (num_step + 1)),
                   'cost =', '{:.6f}'.format(total_loss))
             num_step += 1
 

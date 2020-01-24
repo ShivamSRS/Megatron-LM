@@ -17,7 +17,7 @@
 
 from datetime import datetime
 import os
-os.environ['CUDA_VISIBLE_DEVICES']='0,1,2,3,5,6,7'
+os.environ['CUDA_VISIBLE_DEVICES']='0,1'
 
 import random
 import math

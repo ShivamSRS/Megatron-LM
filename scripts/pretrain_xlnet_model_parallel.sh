@@ -2,7 +2,7 @@
 
 # Runs the "345M" parameter model
 
-GPUS_PER_NODE=6
+GPUS_PER_NODE=2
 # Change for multinode config
 MASTER_ADDR=localhost
 MASTER_PORT=6000
@@ -14,7 +14,7 @@ DISTRIBUTED_ARGS="--nproc_per_node $GPUS_PER_NODE --nnodes $NNODES --node_rank $
 
 python -m torch.distributed.launch $DISTRIBUTED_ARGS \
        xlnet/main.py \
-       --model-parallel-size 2 \
+       --model-parallel-size 2\
        --distributed-backend nccl
 
 

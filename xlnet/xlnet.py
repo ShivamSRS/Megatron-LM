@@ -22,9 +22,71 @@ from __future__ import print_function
 
 import numpy as np
 import mpu
+import torch.nn.init as init
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from mpu import copy_to_model_parallel_region,VocabUtility,get_model_parallel_rank,get_model_parallel_world_size,ColumnParallelLinear ,RowParallelLinear
+
+
+
+
+class XLNetParallelMLP(torch.nn.Module):
+    """MLP for XLNet.
+
+    MLP will take the input with h hidden state, project it to 4*h
+    hidden dimension, perform gelu transformation, and project the
+    state back into h hidden dimension. At the end, dropout is also
+    applied.
+
+    Arguments:
+        hidden_size: The hidden size of the self attention.
+        output_dropout_prob: dropout probability for the outputs
+                             after self attention and final output.
+        init_method: initialization method used for the weights. Note
+                     that all biases are initialized to zero and
+                     layernorm weight are initialized to one.
+        output_layer_init_method: output layer initialization. If None,
+                                  use `init_method`.
+    """
+# changed init method from a compulosory to optional arg
+    def __init__(self, hidden_size, output_dropout_prob, init_method=None,
+                 output_layer_init_method=None):
+        super(XLNetParallelMLP, self).__init__()
+        # Set output layer initialization if not provided.
+        if output_layer_init_method is None:
+            output_layer_init_method = init_method
+        # Project to 4h.
+        self.dense_h_to_4h = ColumnParallelLinear(hidden_size, 4*hidden_size,
+                                                  gather_output=False,
+                                                  init_method=init_method)
+        # Project back to h.
+        self.dense_4h_to_h = RowParallelLinear(
+            4*hidden_size,
+            hidden_size,
+            input_is_parallel=True,
+            init_method=output_layer_init_method)
+        self.dropout = torch.nn.Dropout(output_dropout_prob)
+        self.relu = nn.ReLU(inplace=True)
+
+
+    def forward(self, hidden_states):
+        # [b, s, 4hp]
+        
+        intermediate_parallel = self.dense_h_to_4h(hidden_states)
+        
+        ####added dropout here  and removed dropout on output changed act to relu
+        
+        intermediate_parallel = self.relu(intermediate_parallel)
+        intermediate_parallel = self.dropout(intermediate_parallel)
+
+        # [b, s, h]
+        output = self.dense_4h_to_h(intermediate_parallel)
+        
+        
+        return output
+
 
 class XLNet(nn.Module):
     """
@@ -110,7 +172,7 @@ class XLNet(nn.Module):
 
         self.seg_embed = nn.Parameter(torch.randn(self.n_layer, 2,
                                                    self.n_head, self.d_head))
-
+        
         self.mask_emb = nn.Parameter(torch.randn(1, 1, d_model))
 
         # post-attention projection (back to `d_model`)
@@ -128,12 +190,24 @@ class XLNet(nn.Module):
                                                        self.n_head, self.d_head))
 
         self.layer_norm = nn.LayerNorm(d_model)
+        #change
+        self.positionwise_ffn = XLNetParallelMLP(
+            d_model,
+            dropout)
 
         self.conv1 = nn.Linear(d_model, d_inner)
         self.conv2 = nn.Linear(d_inner, d_model)
         self.relu = nn.ReLU(inplace=True)
+        ##changes : parallelised bias
+        self.vocab_start_index, self.vocab_end_index = \
+            VocabUtility.vocab_range_from_global_vocab_size(
+                self.n_token, get_model_parallel_rank(),
+                get_model_parallel_world_size())
+        self.n_token_per_partition = self.vocab_end_index - \
+                                            self.vocab_start_index
+        self.softmax_b = nn.Parameter(torch.zeros(self.n_token_per_partition))
+                
 
-        self.softmax_b = nn.Parameter(torch.zeros(self.n_token))
 
 
     def gelu(self, x):
@@ -162,20 +236,20 @@ class XLNet(nn.Module):
 
         return x
 
-    def positionwise_ffn(self, inp, activation_type='relu'):
+#     def positionwise_ffn(self, inp, activation_type='relu'):
 
-        """Position-wise Feed-forward Network."""
-        output = self.conv1(inp)
-        output = self.Dropout(output)
-        if activation_type == 'relu':
-            output = self.relu(output)
-        elif activation_type == 'gelu':
-            output = self.gelu(output)
-        else:
-            raise ValueError('Unsupported activation type {}'.format(activation_type))
+#         """Position-wise Feed-forward Network."""
+#         output = self.conv1(inp)
+#         output = self.Dropout(output)
+#         if activation_type == 'relu':
+#             output = self.relu(output)
+#         elif activation_type == 'gelu':
+#             output = self.gelu(output)
+#         else:
+#             raise ValueError('Unsupported activation type {}'.format(activation_type))
 
-        output = self.layer_norm(output + inp)
-        return output
+#         output = self.layer_norm(output + inp)
+#         return output
 
     def post_attention(self, h, attn_vec, residual=True):
         """Post-attention processing."""
@@ -245,44 +319,24 @@ class XLNet(nn.Module):
 
         return attn_vec
 
-    def rel_multihead_attn(self, h, r, r_w_bias, r_r_bias, seg_mat, r_s_bias, seg_embed,
-                           attn_mask, mems, d_model, n_head, d_head, dropout, dropatt):
-        """Multi-head attention with relative positional encoding."""
-
-        scale = 1 / (d_head ** 0.5)
-        if mems is not None and len(mems.size()) > 1:
-            cat = torch.cat([mems, h], dim=0)
-        else:
-            cat = h
-
-        # content heads
-        q_head_h = self.head_projection(h, 'q')
-        k_head_h = self.head_projection(cat, 'k')
-        v_head_h = self.head_projection(cat, 'v')
-
-        # positional heads
-        k_head_r = self.head_projection(r, 'r')
-
-        # core attention ops
-        attn_vec = self.rel_attn_core(
-            q_head_h, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,
-            r_r_bias, r_s_bias, attn_mask, scale)
-
-        # post processing
-        output = self.post_attention(h, attn_vec)
-
-        return output
 
     def two_stream_rel_attn(self, h, g, r, mems, r_w_bias, r_r_bias, seg_mat, r_s_bias,
                             seg_embed, attn_mask_h, attn_mask_g, target_mapping):
         scale = 1 / (self.d_head ** 0.5)
-
+        #h,g,r ([512, 1, 32], [85, 1, 32], [1024, 1, 32]
         # content based attention score
         if mems is not None and len(mems.size()) > 1:
             cat = torch.cat([mems, h], dim=0)
         else:
             cat = h
-
+        print("#############################################")
+        print("cat", cat.shape,cat.device)
+#         print("mems", mems.shape,mems.device)
+        print("h", h.shape,h.device)
+        print("r", r.shape,r.device)
+        print("Segembed",seg_embed.shape,seg_embed.device)
+        print("target_mapping",target_mapping.shape,target_mapping.device)
+        print("############################################")
         # content-based key head
         k_head_h = self.head_projection(cat, 'k')
 
@@ -296,6 +350,7 @@ class XLNet(nn.Module):
         # content-stream query head
         q_head_h = self.head_projection(h, 'q')
 
+
         # core attention ops
         # hˆ(m)_zt = LayerNorm(h^(m-1)_zt + RelAttn(h^(m-1)_zt + [h~^(m-1), hT(m-1)_z<=t]))
         attn_vec_h = self.rel_attn_core(
@@ -308,6 +363,11 @@ class XLNet(nn.Module):
         ##### g-stream
         # query-stream query head
         q_head_g = self.head_projection(g, 'q')
+        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+        print("b4 q_head_g", q_head_g.shape,q_head_g.device)
+        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+        # content-based key head
+        k_head_h = self.head_projection(cat, 'k')
 
         # core attention ops
         # gˆ(m)_zt = LayerNorm(g^(m-1)_zt + RelAttn(g^(m-1)_zt + [h~^(m-1), hT(m-1)_z<=t]))
@@ -324,7 +384,20 @@ class XLNet(nn.Module):
 
         # post processing
         output_g = self.post_attention(g, attn_vec_g)
-
+        
+        print("#############################################")
+        print("k_head_h", k_head_h.shape,k_head_h.device)
+        print("v_head_h",v_head_h.shape,v_head_h.device)
+        print("k_head_r", k_head_r.shape,k_head_r.device)
+        print("q_head_h",q_head_h.shape,q_head_h.device)
+        print("output_h", output_h.shape,output_h.device)
+        print("Segembed",seg_embed.shape,seg_embed.device)
+        print("Seg mat",seg_mat.shape,seg_mat.device)    
+        print("afta q_head_g", q_head_g.shape,q_head_g.device)
+        print("attn_vec_g", attn_vec_g.shape,attn_vec_g.device)
+        print("output_g", output_g.shape,output_g.device)
+        print("############################################")
+        
         return output_h, output_g
 
 
@@ -418,7 +491,6 @@ class XLNet(nn.Module):
 
     def forward(self, inp_k, seg_id, input_mask, mems, perm_mask, target_mapping, inp_q):
         new_mems = []
-        
         bsz = inp_k.shape[1]
         qlen = inp_k.shape[0]
         mlen = mems[0].size(0) if mems is not None else 0
@@ -455,8 +527,11 @@ class XLNet(nn.Module):
             else:
                 attn_mask += data_mask[:, :, :, None]
 
+#         print("attn_mask_BEFORE: ", attn_mask)
+        
         if attn_mask is not None:
             attn_mask = attn_mask.gt(0).type(torch.float32)
+#             print("attn_mask_AFTER: ", attn_mask)
 
         if attn_mask is not None:
             non_tgt_mask = -torch.eye(qlen, dtype=torch.float32) # [qlen, qlen]
@@ -473,6 +548,8 @@ class XLNet(nn.Module):
         ##### Word embedding
         lookup_table = self.embedding
         word_emb_k = lookup_table(inp_k)
+        print(inp_k.shape,word_emb_k.shape,lookup_table.weight.shape,"a bC")
+
 
         if inp_q is not None:
             if target_mapping is not None:
@@ -501,7 +578,9 @@ class XLNet(nn.Module):
 
             # `1` indicates not in the same segment [qlen x klen x bsz]
             seg_mat = (~torch.eq(seg_id[:, None], cat_ids[None, :])).type(torch.long)
+#             print("seg_mat_BEFORE: ", seg_mat, seg_mat.shape, seg_mat.type, seg_mat.device)
             seg_mat = torch.eye(2, dtype=torch.float32)[seg_mat]
+#             print("seg_mat_AFTER: ", seg_mat, seg_mat.shape, seg_mat.type, seg_mat.device)
         else:
             seg_mat = None
 
@@ -510,6 +589,7 @@ class XLNet(nn.Module):
             qlen, klen, self.d_model, self.clamp_len, self.attn_type, self.bi_data,
             bsz=bsz, dtype=torch.float32)
         pos_emb = self.Dropout(pos_emb)
+        pos_emb= pos_emb.to(torch.cuda.current_device())
 
         ##### Attention layers
         if mems is None:
@@ -518,7 +598,6 @@ class XLNet(nn.Module):
         for i in range(self.n_layer):
             # cache new mems
             new_mems.append(self._cache_mem(output_h, mems[i], self.mem_len, self.reuse_len))
-
             # segment bias
             if seg_id is None:
                 r_s_bias_i = None
@@ -528,7 +607,7 @@ class XLNet(nn.Module):
                 seg_embed_i = self.seg_embed[i]
 
             if inp_q is not None:
-                output_h, output_g = self.two_stream_rel_attn(
+                ioutput_h, ioutput_g = self.two_stream_rel_attn(
                     h=output_h,
                     g=output_g,
                     r=pos_emb,
@@ -554,21 +633,29 @@ class XLNet(nn.Module):
                     mems=mems[i])
 
             if inp_q is not None:
-                output_g = self.positionwise_ffn(inp=output_g)
+                output_g = self.positionwise_ffn(ioutput_g)
+                output_g=self.layer_norm(output_g + ioutput_g)
 
-            output_h = self.positionwise_ffn(inp=output_h)
+
+            output_h = self.positionwise_ffn(ioutput_h)
+            output_h=self.layer_norm(output_h + ioutput_h)
 
         if inp_q is not None:
             output = self.Dropout(output_g)
         else:
             output = self.Dropout(output_h)
-        print(output.shape,output.device,"output",self.softmax_b.shape,self.softmax_b.device,"softmax")
-        print("lookup table",lookup_table.weight.shape,lookup_table.weight.device)
+#         print(output.shape,output.device,"output",self.softmax_b.shape,self.softmax_b.device,"softmax")
+#         print("lookup table",lookup_table.weight.shape,lookup_table.weight.device)
         #-----------------------srs----------------------------------------
         #lookup table weights are still parallel shhape is [15261,32]  softmax [30522]
-        # output is [85,1,32]
-        
+#         # output is [85,1,32]
+#         print("------------")
+#         print(lookup_table.weight.t().shape,"-----------------------",sep="\n")
         ##option a call an allgather or all reduce on lookup weights or b parallelise output
-        logits = torch.einsum('ibd,nd->ibn', output, lookup_table.weight) + self.softmax_b
-
+        #Ssoftmax_b = copy_to_model_parallel_region( self.softmax_b)
+#         print("####################################","output",output,"################################",sep="\n")
+#         print("####################################","lookup",lookup_table.weight,"################################",sep="\n")
+        logits =  torch.einsum('ibd,nd->ibn', output, lookup_table.weight) + self.softmax_b
+        #torch.matmul(output,lookup_table.weight.t())
+        
         return logits, new_mems

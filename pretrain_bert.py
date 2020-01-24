@@ -42,7 +42,7 @@ from utils import print_params_min_max_norm
 from utils import print_rank_0
 from utils import enable_adlr_autoresume
 from utils import check_adlr_autoresume_termination
-os.environ['CUDA_VISIBLE_DEVICES']='1,2,3,5,6,7'
+os.environ['CUDA_VISIBLE_DEVICES']='0,1'
 
 def get_model(args):
     """Build the model."""
