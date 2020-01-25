@@ -105,9 +105,7 @@ class GPT2Model(torch.nn.Module):
         # Embeddings.
         print("input ids",input_ids.shape,input_ids.device)
         words_embeddings = self.word_embeddings(input_ids)
-        print("word_embeddings",word_embeddings.shape,word_embeddings,words_embeddings.device)
         position_embeddings = self.position_embeddings(position_ids)
-        print("pos_embeddings",position_embeddings.shape,position_embeddings.device)
 
         embeddings = words_embeddings + position_embeddings
         if tokentype_ids is not None:

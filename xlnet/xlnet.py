@@ -24,11 +24,237 @@ import numpy as np
 import mpu
 import torch.nn.init as init
 
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from mpu import copy_to_model_parallel_region,VocabUtility,get_model_parallel_rank,get_model_parallel_world_size,ColumnParallelLinear ,RowParallelLinear
+from mpu import copy_to_model_parallel_region,VocabUtility,get_model_parallel_rank,get_model_parallel_world_size,ColumnParallelLinear ,RowParallelLinear,divide,split_tensor_along_last_dim
 
+
+class ParallelAttntn(torch.nn.Module):
+    
+    def __init__(self, hidden_size, num_attention_heads,
+                 attention_dropout_prob, output_dropout_prob,proj_size,
+                 init_method=None, output_layer_init_method=None):
+        super(ParallelAttntn, self).__init__()
+        ##############
+        self.d_head=hidden_size
+        # Set output layer initialization if not provided.
+        if output_layer_init_method is None:
+            output_layer_init_method = init_method
+        # Per attention head and per partition values.
+        world_size = get_model_parallel_world_size()
+        self.hidden_size_per_partition = divide(hidden_size, world_size)
+        self.hidden_size_per_attention_head = divide(hidden_size,
+                                                     num_attention_heads)
+        self.num_attention_heads_per_partition = divide(num_attention_heads,
+                                                        world_size)
+        # Strided linear layer.
+        self.q_proj_weight = nn.Parameter(torch.randn(*proj_size))
+        self.k_proj_weight = nn.Parameter(torch.randn(*proj_size))
+        self.v_proj_weight = nn.Parameter(torch.randn(*proj_size))
+        self.r_proj_weight = nn.Parameter(torch.randn(*proj_size))
+        self.proj_o = nn.Parameter(torch.randn(*proj_size))
+        self.key = ColumnParallelLinear(hidden_size, hidden_size,
+                                                    stride=1,
+                                                    gather_output=False,
+                                                    init_method=init_method)
+        self.val = ColumnParallelLinear(hidden_size, hidden_size,
+                                            stride=1,
+                                            gather_output=False,
+                                            init_method=init_method)
+        self.q = ColumnParallelLinear(hidden_size, hidden_size,
+                                                    stride=1,
+                                                    gather_output=False,
+                                                    init_method=init_method)
+        self.r = ColumnParallelLinear(hidden_size, hidden_size,
+                                                    stride=1,
+                                                    gather_output=False,
+                                                    init_method=init_method)
+        self.g = ColumnParallelLinear(hidden_size, hidden_size,
+                                                    stride=1,
+                                                    gather_output=False,
+                                                    init_method=init_method)
+        # Dropout. Note that for a single iteration, this layer will generate
+        # different outputs on different number of parallel partitions but
+        # on average it should not be partition dependent.
+        self.attention_dropout = torch.nn.Dropout(attention_dropout_prob)
+        self.layer_norm = nn.LayerNorm(proj_size[0])
+        # Output.
+        self.dense = RowParallelLinear(hidden_size,
+                                       hidden_size,
+                                       input_is_parallel=True,
+                                       init_method=output_layer_init_method)
+        self.output_dropout = torch.nn.Dropout(output_dropout_prob)
+        
+    def post_attention(self, h, attn_vec, residual=True):
+        """Post-attention processing."""
+
+        # post-attention projection (back to `d_model`) changed to self.dense instead of proj_o
+        attn_vec = self.dense(attn_vec)
+        attn_out = torch.einsum('ibnd,hnd->ibh', attn_vec, self.proj_o)
+
+        attn_out = self.output_dropout(attn_out)
+        if residual:
+            output = self.layer_norm(attn_out + h)
+        else:
+            output = self.layer_norm(attn_out)
+
+        return output
+
+    def rel_shift(self, x, klen=-1):
+        """perform relative shift to form the relative attention score."""
+        x_size = x.shape
+
+        x = torch.reshape(x, [x_size[1], x_size[0], x_size[2], x_size[3]])
+        x = x[1:, 0:, 0:, 0:] # tf.slice(x, [1, 0, 0, 0], [-1, -1, -1, -1])
+        x = torch.reshape(x, [x_size[0], x_size[1] - 1, x_size[2], x_size[3]])
+        x = x[0:, 0:klen, 0:, 0:] # tf.slice(x, [0, 0, 0, 0], [-1, klen, -1, -1])
+
+        return x
+    def head_projection(self, h, name):
+        """Project hidden states to a specific head with a 4D-shape."""
+        proj_weight = None
+        if name == 'q':
+            proj_weight = self.q_proj_weight
+        elif name == 'k':
+            proj_weight = self.k_proj_weight 
+        elif name =='v':
+            proj_weight = self.v_proj_weight 
+        elif name == 'r':
+            proj_weight = self.r_proj_weight
+        else:
+            raise ValueError('Unknown `name` {}.'.format(name))
+        h = h.to(torch.cuda.current_device())
+
+        head = torch.einsum('ibh,hnd->ibnd', h, proj_weight)
+
+        return head
+
+    def rel_attn_core(self, q_head, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat,
+                      r_w_bias, r_r_bias, r_s_bias, attn_mask, scale):
+
+        """Core relative positional attention operations."""
+
+        # content based attention score
+        print("QQQQQQQQQQQQ",q_head.shape,r_w_bias.shape,k_head_h.shape)
+        ac = torch.einsum('ibnd,jbnd->ijbn', q_head + r_w_bias, k_head_h)
+
+        # position based attention score
+        bd = torch.einsum('ibnd,jbnd->ijbn', q_head + r_r_bias, k_head_r)
+        bd = self.rel_shift(bd, klen=ac.shape[1])
+
+        # segment based attention score
+        if seg_mat is None:
+            ef = 0
+        else:
+            ef = torch.einsum('ibnd,snd->ibns', q_head + r_s_bias, seg_embed)
+            seg_mat = seg_mat.to(torch.cuda.current_device())
+            ef = torch.einsum('ijbs,ibns->ijbn', seg_mat, ef)
+
+        # merge attention scores and perform masking
+        attn_score = (ac + bd + ef) * scale
+        if attn_mask is not None:
+            # attn_score = attn_score * (1 - attn_mask) - 1e30 * attn_mask
+            attn_score = attn_score - 1e30 * attn_mask
+
+        # attention probability
+        attn_prob = F.softmax(attn_score, dim=1)
+        attn_prob = self.output_dropout(attn_prob)
+
+        # attention output
+        attn_vec = torch.einsum('ijbn,jbnd->ibnd', attn_prob, v_head_h)
+
+        return attn_vec
+
+    
+    
+    def forward(self, h, g, r, mems, r_w_bias, r_r_bias, seg_mat, r_s_bias,
+                            seg_embed, attn_mask_h, attn_mask_g, target_mapping):
+        
+        scale = 1 / (self.d_head ** 0.5)
+        #h,g,r ([512, 1, 32], [85, 1, 32], [1024, 1, 32]
+        # content based attention score
+        if mems is not None and len(mems.size()) > 1:
+            cat = torch.cat([mems, h], dim=0)
+        else:
+            cat = h
+        print(cat.shape,"CAT",self.key.weight.shape)
+        # content-based key head
+        k_head_h =self.head_projection(cat, 'k')
+        k_head_h = self.key(k_head_h)
+        
+        #v_k_head= torch.einsum('ibh,hnd->ibnd',cat, self.key_value)
+        # content-based value head
+        v_head_h =  self.head_projection(cat, 'v')
+        v_head_h = self.val(v_head_h)
+
+        #k_head,v_head = split_tensor_along_last_dim(v_k_head,2)
+        # position-based key head
+        k_head_r = self.head_projection(r, 'r')
+        k_head_r = self.r(k_head_r)
+
+        ##### h-stream
+        # content-stream query head
+        q_head_h =self.head_projection(h, 'q')
+        q_head_h = self.q(q_head_h)
+
+
+
+        # core attention ops
+        # hˆ(m)_zt = LayerNorm(h^(m-1)_zt + RelAttn(h^(m-1)_zt + [h~^(m-1), hT(m-1)_z<=t]))
+        attn_vec_h = self.rel_attn_core(
+            q_head_h, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,
+            r_r_bias, r_s_bias, attn_mask_h, scale)
+
+        # post processing
+        output_h = self.post_attention(h, attn_vec_h)
+
+        ##### g-stream
+        # query-stream query head
+        q_head_g =  torch.einsum('ibh,hnd->ibnd', g,self.q_proj_weight)#self.head_projection(g, 'q')
+        q_head_g = self.g(q_head_g)
+
+        # core attention ops
+        # gˆ(m)_zt = LayerNorm(g^(m-1)_zt + RelAttn(g^(m-1)_zt + [h~^(m-1), hT(m-1)_z<=t]))
+        if target_mapping is not None:
+            q_head_g = torch.einsum('mbnd,mlb->lbnd', q_head_g, target_mapping)
+            attn_vec_g = self.rel_attn_core(
+                q_head_g, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,
+                r_r_bias, r_s_bias, attn_mask_g, scale)
+            attn_vec_g = torch.einsum('lbnd,mlb->mbnd', attn_vec_g, target_mapping)
+        else:
+            attn_vec_g = self.rel_attn_core(
+                q_head_g, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,
+                r_r_bias, r_s_bias, attn_mask_g, scale)
+
+        # post processing
+        output_g = self.post_attention(g, attn_vec_g)
+#         print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
+#         print("b4 q_head_g", q_head_g.shape,q_head_g.device)
+#         print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")        
+#         print("#############################################")
+#         print("k_head_h", k_head_h.shape,k_head_h.device)
+#         print("v_head_h",v_head_h.shape,v_head_h.device)
+#         print("k_head_r", k_head_r.shape,k_head_r.device)
+#         print("q_head_h",q_head_h.shape,q_head_h.device)
+#         print("output_h", output_h.shape,output_h.device)
+#         print("Segembed",seg_embed.shape,seg_embed.device)
+#         print("Seg mat",seg_mat.shape,seg_mat.device)    
+#         print("afta q_head_g", q_head_g.shape,q_head_g.device)
+#         print("attn_vec_g", attn_vec_g.shape,attn_vec_g.device)
+#         print("output_g", output_g.shape,output_g.device)
+#         print("############################################")
+#         print("#############################################")
+#         print("cat", cat.shape,cat.device)
+# #         print("mems", mems.shape,mems.device)
+#         print("h", h.shape,h.device)
+#         print("r", r.shape,r.device)
+#         print("Segembed",seg_embed.shape,seg_embed.device)
+#         print("target_mapping",target_mapping.shape,target_mapping.device)
+#         print("############################################")
+        
+        return output_h, output_g
 
 
 
@@ -160,18 +386,20 @@ class XLNet(nn.Module):
         self.embedding = mpu.VocabParallelEmbedding(n_token, d_model)
         self.Dropout = nn.Dropout(p=dropout)
         self.DropAttn = nn.Dropout(p=dropatt)
+        world_size = get_model_parallel_world_size()
+        self.dhead_size_per_partition = divide(self.d_head, world_size)
 
         self.r_w_bias = nn.Parameter(torch.randn(self.n_layer,
-                                                  self.n_head,self.d_head))
+                                                  self.n_head,self.dhead_size_per_partition))
         self.r_r_bias = nn.Parameter(torch.randn(self.n_layer,
-                                                  self.n_head, self.d_head))
+                                                  self.n_head,self.dhead_size_per_partition))
 
         ##### Segment embedding
         self.r_s_bias = nn.Parameter(torch.randn(self.n_layer,
-                                                  self.n_head,self.d_head))
+                                                  self.n_head,self.dhead_size_per_partition))
 
         self.seg_embed = nn.Parameter(torch.randn(self.n_layer, 2,
-                                                   self.n_head, self.d_head))
+                                                   self.n_head, self.dhead_size_per_partition))
         
         self.mask_emb = nn.Parameter(torch.randn(1, 1, d_model))
 
@@ -188,7 +416,9 @@ class XLNet(nn.Module):
                                                        self.n_head, self.d_head))
         self.r_proj_weight = nn.Parameter(torch.randn(self.d_model,
                                                        self.n_head, self.d_head))
-
+        
+        hidden_size=(self.d_model,self.n_head ,self.d_head)
+        self.two_stream_rel_attn = ParallelAttntn(self.d_head,self.n_head,dropatt,dropout,hidden_size)
         self.layer_norm = nn.LayerNorm(d_model)
         #change
         self.positionwise_ffn = XLNetParallelMLP(
@@ -225,16 +455,7 @@ class XLNet(nn.Module):
             (np.sqrt(2 / np.pi) * (x + 0.044715 * torch.pow(x, 3)))))
         return x * cdf
 
-    def rel_shift(self, x, klen=-1):
-        """perform relative shift to form the relative attention score."""
-        x_size = x.shape
 
-        x = torch.reshape(x, [x_size[1], x_size[0], x_size[2], x_size[3]])
-        x = x[1:, 0:, 0:, 0:] # tf.slice(x, [1, 0, 0, 0], [-1, -1, -1, -1])
-        x = torch.reshape(x, [x_size[0], x_size[1] - 1, x_size[2], x_size[3]])
-        x = x[0:, 0:klen, 0:, 0:] # tf.slice(x, [0, 0, 0, 0], [-1, klen, -1, -1])
-
-        return x
 
 #     def positionwise_ffn(self, inp, activation_type='relu'):
 
@@ -251,154 +472,7 @@ class XLNet(nn.Module):
 #         output = self.layer_norm(output + inp)
 #         return output
 
-    def post_attention(self, h, attn_vec, residual=True):
-        """Post-attention processing."""
 
-        # post-attention projection (back to `d_model`)
-        attn_out = torch.einsum('ibnd,hnd->ibh', attn_vec, self.proj_o)
-
-        attn_out = self.Dropout(attn_out)
-        if residual:
-            output = self.layer_norm(attn_out + h)
-        else:
-            output = self.layer_norm(attn_out)
-
-        return output
-
-    def head_projection(self, h, name):
-        """Project hidden states to a specific head with a 4D-shape."""
-        proj_weight = None
-        if name == 'q':
-            proj_weight = self.q_proj_weight
-        elif name == 'k':
-            proj_weight = self.k_proj_weight
-        elif name =='v':
-            proj_weight = self.v_proj_weight
-        elif name == 'r':
-            proj_weight = self.r_proj_weight
-        else:
-            raise ValueError('Unknown `name` {}.'.format(name))
-        h = h.to(torch.cuda.current_device())
-
-        head = torch.einsum('ibh,hnd->ibnd', h, proj_weight)
-
-        return head
-
-    def rel_attn_core(self, q_head, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat,
-                      r_w_bias, r_r_bias, r_s_bias, attn_mask, scale):
-
-        """Core relative positional attention operations."""
-
-        # content based attention score
-        ac = torch.einsum('ibnd,jbnd->ijbn', q_head + r_w_bias, k_head_h)
-
-        # position based attention score
-        bd = torch.einsum('ibnd,jbnd->ijbn', q_head + r_r_bias, k_head_r)
-        bd = self.rel_shift(bd, klen=ac.shape[1])
-
-        # segment based attention score
-        if seg_mat is None:
-            ef = 0
-        else:
-            ef = torch.einsum('ibnd,snd->ibns', q_head + r_s_bias, seg_embed)
-            seg_mat = seg_mat.to(torch.cuda.current_device())
-            ef = torch.einsum('ijbs,ibns->ijbn', seg_mat, ef)
-
-        # merge attention scores and perform masking
-        attn_score = (ac + bd + ef) * scale
-        if attn_mask is not None:
-            # attn_score = attn_score * (1 - attn_mask) - 1e30 * attn_mask
-            attn_score = attn_score - 1e30 * attn_mask
-
-        # attention probability
-        attn_prob = F.softmax(attn_score, dim=1)
-        attn_prob = self.DropAttn(attn_prob)
-
-        # attention output
-        attn_vec = torch.einsum('ijbn,jbnd->ibnd', attn_prob, v_head_h)
-
-        return attn_vec
-
-
-    def two_stream_rel_attn(self, h, g, r, mems, r_w_bias, r_r_bias, seg_mat, r_s_bias,
-                            seg_embed, attn_mask_h, attn_mask_g, target_mapping):
-        scale = 1 / (self.d_head ** 0.5)
-        #h,g,r ([512, 1, 32], [85, 1, 32], [1024, 1, 32]
-        # content based attention score
-        if mems is not None and len(mems.size()) > 1:
-            cat = torch.cat([mems, h], dim=0)
-        else:
-            cat = h
-        print("#############################################")
-        print("cat", cat.shape,cat.device)
-#         print("mems", mems.shape,mems.device)
-        print("h", h.shape,h.device)
-        print("r", r.shape,r.device)
-        print("Segembed",seg_embed.shape,seg_embed.device)
-        print("target_mapping",target_mapping.shape,target_mapping.device)
-        print("############################################")
-        # content-based key head
-        k_head_h = self.head_projection(cat, 'k')
-
-        # content-based value head
-        v_head_h = self.head_projection(cat, 'v')
-
-        # position-based key head
-        k_head_r = self.head_projection(r, 'r')
-
-        ##### h-stream
-        # content-stream query head
-        q_head_h = self.head_projection(h, 'q')
-
-
-        # core attention ops
-        # hˆ(m)_zt = LayerNorm(h^(m-1)_zt + RelAttn(h^(m-1)_zt + [h~^(m-1), hT(m-1)_z<=t]))
-        attn_vec_h = self.rel_attn_core(
-            q_head_h, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,
-            r_r_bias, r_s_bias, attn_mask_h, scale)
-
-        # post processing
-        output_h = self.post_attention(h, attn_vec_h)
-
-        ##### g-stream
-        # query-stream query head
-        q_head_g = self.head_projection(g, 'q')
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        print("b4 q_head_g", q_head_g.shape,q_head_g.device)
-        print("@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@@")
-        # content-based key head
-        k_head_h = self.head_projection(cat, 'k')
-
-        # core attention ops
-        # gˆ(m)_zt = LayerNorm(g^(m-1)_zt + RelAttn(g^(m-1)_zt + [h~^(m-1), hT(m-1)_z<=t]))
-        if target_mapping is not None:
-            q_head_g = torch.einsum('mbnd,mlb->lbnd', q_head_g, target_mapping)
-            attn_vec_g = self.rel_attn_core(
-                q_head_g, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,
-                r_r_bias, r_s_bias, attn_mask_g, scale)
-            attn_vec_g = torch.einsum('lbnd,mlb->mbnd', attn_vec_g, target_mapping)
-        else:
-            attn_vec_g = self.rel_attn_core(
-                q_head_g, k_head_h, v_head_h, k_head_r, seg_embed, seg_mat, r_w_bias,
-                r_r_bias, r_s_bias, attn_mask_g, scale)
-
-        # post processing
-        output_g = self.post_attention(g, attn_vec_g)
-        
-        print("#############################################")
-        print("k_head_h", k_head_h.shape,k_head_h.device)
-        print("v_head_h",v_head_h.shape,v_head_h.device)
-        print("k_head_r", k_head_r.shape,k_head_r.device)
-        print("q_head_h",q_head_h.shape,q_head_h.device)
-        print("output_h", output_h.shape,output_h.device)
-        print("Segembed",seg_embed.shape,seg_embed.device)
-        print("Seg mat",seg_mat.shape,seg_mat.device)    
-        print("afta q_head_g", q_head_g.shape,q_head_g.device)
-        print("attn_vec_g", attn_vec_g.shape,attn_vec_g.device)
-        print("output_g", output_g.shape,output_g.device)
-        print("############################################")
-        
-        return output_h, output_g
 
 
     def _create_mask(self, qlen, mlen, dtype, same_length=False):

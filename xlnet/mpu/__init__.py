@@ -22,6 +22,9 @@ from .data import broadcast_data
 from .grads import clip_grad_norm
 
 from .utils import VocabUtility
+from .utils import divide
+from .utils import split_tensor_along_last_dim
+
 
 from .initialize import destroy_model_parallel
 from .initialize import get_data_parallel_group

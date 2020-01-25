@@ -15,12 +15,12 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 """
-
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
 
 from utils import Timers
+import time
 
 from utils import print_args
 from utils import print_params_min_max_norm
@@ -146,6 +146,7 @@ def main():
                                            mask_beta=args.mask_beta)
 
         num_step = 0
+        start = time.time()
         for feature in features:
 
             permutation = data_utils.make_permute(feature,
@@ -199,5 +200,11 @@ def main():
             optimizer.step()
 
             mems = new_mems
+        now=time.time()
+        print("#################")
+        print("@@@@@@@@@@@@@@@@")
+        print("this epoch",num_epoch+1,"took",now-start)
+        print("#################")
+        print("@@@@@@@@@@@@@@@@")
             
 main()

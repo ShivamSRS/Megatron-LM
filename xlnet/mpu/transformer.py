@@ -488,7 +488,7 @@ class BertParallelSelfAttention(torch.nn.Module):
                                                         world_size)
         # Strided linear layer.
         self.query_key_value = ColumnParallelLinear(hidden_size, 3*hidden_size,
-                                                    stride=3,
+                                                    stride=2,
                                                     gather_output=False,
                                                     init_method=init_method)
         # Dropout. Note that for a single iteration, this layer will generate

@@ -70,6 +70,7 @@ class GPT2ParallelSelfAttention(torch.nn.Module):
             output_layer_init_method = init_method
         # Per attention head and per partition values.
         world_size = get_model_parallel_world_size()
+        print(hidden_size,"hidden size")
         self.hidden_size_per_partition = divide(hidden_size, world_size)
         self.hidden_size_per_attention_head = divide(hidden_size,
                                                      num_attention_heads)
@@ -107,6 +108,7 @@ class GPT2ParallelSelfAttention(torch.nn.Module):
         # ltor_mask: [1, 1, s, s]
 
         # Attention heads. [b, s, hp]
+        print(hidden_states.shape,"hidden states")
         mixed_x_layer = self.query_key_value(hidden_states)
         (mixed_query_layer,
          mixed_key_layer,
